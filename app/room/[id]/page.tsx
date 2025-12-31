@@ -182,7 +182,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           status,
           createdAt: data.created_at, // Fixed: Added missing createdAt property
           permissionContext: data.permission_context,
-          sessionPrivateKey: data.session_private_key,
+          // sessionPrivateKey: data.session_private_key, // REMOVED FOR SECURITY
         })
 
         // Check if user has already submitted (requires wallet connection to be effective across devices, 
