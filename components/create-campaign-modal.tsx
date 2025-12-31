@@ -432,12 +432,23 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
 
     if (error) {
       console.error("Error creating campaign:", error)
-      alert("Failed to create room. Please check your connection.")
+
+      console.error("Error details:", JSON.stringify(error, null, 2))
+
+      let errorMessage = "Failed to create room. Please check your connection."
+      if (Object.keys(error).length === 0) {
+        console.error("Empty error object. Ensure Supabase credentials are set correctly in .env.local")
+      } else if (JSON.stringify(error).includes("Could not find the 'owner' column") || JSON.stringify(error).includes("schema cache")) {
+        errorMessage = "Database schema mismatch. Please run the SQL migration script in your Supabase Dashboard."
+        alert(errorMessage + " \n\nWe have created a file 'supabase/migrations/fix_schema.sql' for you to run.")
+        return
+      } else if ((error as any).message) {
+        errorMessage += ` Error: ${(error as any).message}`
+      }
+
+      alert(errorMessage)
       return
     }
-
-    // Dispatch event for local updates if needed, though dashboard should now fetch from DB
-    window.dispatchEvent(new CustomEvent("newCampaign", { detail: campaign }))
 
     setStep(6)
   }

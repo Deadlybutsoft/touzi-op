@@ -58,6 +58,11 @@ export default function DashboardContent() {
     if (!account) return
 
     const fetchCampaigns = async () => {
+      // Diagnostic: Check Supabase configuration
+      console.log("🔍 Supabase URL:", process.env.NEXT_PUBLIC_SUPABASE_URL || "NOT SET")
+      console.log("🔍 Supabase Key:", process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? "SET ✓" : "NOT SET ✗")
+      console.log("🔍 Connected account:", account)
+
       const { data, error } = await supabase
         .from("campaigns")
         .select("*")
@@ -65,7 +70,19 @@ export default function DashboardContent() {
         .order("created_at", { ascending: false })
 
       if (error) {
-        console.error("Error fetching campaigns:", error)
+        console.error("❌ Error fetching campaigns:", error)
+        console.error("❌ Error details:", JSON.stringify(error, null, 2))
+        console.error("❌ Error type:", typeof error)
+        console.error("❌ Error keys:", Object.keys(error))
+
+        // If error is empty object, it might be a network error or CORS issue
+        if (Object.keys(error).length === 0) {
+          console.error("⚠️ EMPTY ERROR OBJECT - This usually means:")
+          console.error("   1. Supabase credentials are not configured (check .env.local)")
+          console.error("   2. Supabase URL is invalid or unreachable")
+          console.error("   3. Network/CORS issue")
+          console.error("   4. Dev server needs restart after adding .env.local")
+        }
         return
       }
 

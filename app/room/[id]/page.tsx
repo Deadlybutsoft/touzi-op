@@ -32,9 +32,6 @@ import {
 import { cn } from "@/lib/utils"
 import { format, differenceInSeconds } from "date-fns"
 import Link from "next/link"
-import { createWalletClient, http, parseEther } from "viem"
-import { privateKeyToAccount } from "viem/accounts"
-import { CHAIN } from "@/lib/constants"
 
 const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
@@ -313,58 +310,33 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
 
     // Optimistic UI Update (optional, or just wait for DB)
 
-    // Execute Instant Payout using Advanced Permissions if configured
-    if (isInstantReward && campaign?.permissionContext && campaign?.sessionPrivateKey) {
-      console.log("🎁 INSTANT REWARD - Executing Payout via Advanced Permissions")
-      console.log("Permission Context:", campaign.permissionContext)
+    // Execute Instant Payout via Secure API if configured
+    if (isInstantReward && campaign?.permissionContext) {
+      console.log("🎁 INSTANT REWARD - Executing Payout via Secure API")
 
       try {
-        // Use the Session Key to sign/execute the payout
-        const sessionAccount = privateKeyToAccount(campaign.sessionPrivateKey as `0x${string}`);
-        const client = createWalletClient({
-          account: sessionAccount,
-          chain: CHAIN,
-          transport: http()
-        });
-
         const amountToPay = campaign.instantReward?.amountPerWinner || "0";
         console.log(`💰 Processing Instant Payout of ${amountToPay} ETH to ${account}...`);
 
-        // Constructing a Real UserOperation for EIP-4337 Execution
-        // This is the exact object that would be sent to a Bundler (e.g. Pimlico, Stackup)
-        const userOp = {
-          sender: campaign.permissionContext.signer, // The Smart Account Address
-          nonce: "0x" + Date.now().toString(16),
-          callData: "0x" + parseEther(amountToPay).toString(16),
-          callGasLimit: "0x10000",
-          verificationGasLimit: "0x10000",
-          preVerificationGas: "0x10000",
-          maxFeePerGas: "0x3B9ACA00", // 1 Gwei
-          maxPriorityFeePerGas: "0x77359400", // 2 Gwei
-          paymasterAndData: "0x",
-          signature: "0x"
-        };
-
-        console.log("📝 UserOperation Draft:", userOp);
-        console.log("✍️ Signing with Session Key...");
-
-        // Session key signs the UserOp hash (EIP-7715 flow)
-        const signature = await client.signMessage({
-          message: `Authorize payout: ${amountToPay} ${campaign.prizeType} to ${account}`
+        // Call secure server-side API for payout
+        const response = await fetch('/api/claim-reward', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            campaignId: id,
+            walletAddress: account,
+          }),
         });
 
-        userOp.signature = signature;
+        const result = await response.json();
 
-        // Generate a mock transaction hash for demo purposes
-        const mockTxHash = `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+        if (!response.ok) {
+          throw new Error(result.error || 'Payout failed');
+        }
 
-        console.log("✅ UserOperation Signed:", userOp);
-        console.log("📡 Broadcasting to Bundler...");
-
-        // Simulating network confirmation
-        await new Promise(resolve => setTimeout(resolve, 1500));
-
-        console.log("🎉 Payout Confirmed! TX:", mockTxHash);
+        console.log("🎉 Payout Confirmed! TX:", result.txHash);
 
         // Update submission with payment info
         submissionData.reward_paid = true;
@@ -372,11 +344,11 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         // Track reward payment state
         setRewardPaid(true);
         setRewardAmount(amountToPay);
-        setPayoutTxHash(mockTxHash);
+        setPayoutTxHash(result.txHash || '');
 
-      } catch (error) {
+      } catch (error: any) {
         console.error("❌ Payout Failed:", error);
-        setPayoutError("Payout failed. Please try again.");
+        setPayoutError(error.message || "Payout failed. Please try again.");
         setIsSubmitting(false);
         return;
       }
@@ -707,7 +679,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
               !connected || !account ? (
                 <Button
                   size="lg"
-                  className="w-full mt-6 rounded-full h-14 bg-white text-black hover:bg-white/90 font-semibold"
+                  className="w-full mt-6 rounded-full h-14 bg-gradient-to-r from-emerald-500 to-green-500 text-white hover:from-emerald-400 hover:to-green-400 font-semibold shadow-lg shadow-emerald-500/30"
                   onClick={() => {
                     try {
                       sdk?.connect()
@@ -717,55 +689,43 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
                   }}
                 >
                   <Wallet className="size-5 mr-2" />
-                  Connect Wallet to Join
+                  Connect Wallet to Claim Reward
                 </Button>
               ) : (
-                <>
-                  <Button
-                    size="lg"
-                    className={cn(
-                      "w-full mt-6 rounded-full h-14 font-semibold transition-all",
-                      campaign?.rewardType === "instant"
-                        ? "bg-gradient-to-r from-emerald-500 to-green-500 text-white hover:from-emerald-400 hover:to-green-400 shadow-lg shadow-emerald-500/30"
-                        : "bg-white text-black hover:bg-white/90"
-                    )}
-                    onClick={claimReward}
-                    disabled={isSubmitting}
-                  >
-                    {isSubmitting ? (
-                      <>
-                        <Loader2 className="size-5 animate-spin" />
-                        {campaign?.rewardType === "instant" ? "Processing Payout..." : "Joining..."}
-                      </>
-                    ) : (
-                      <>
-                        {campaign?.rewardType === "instant" ? (
-                          <>
-                            <Zap className="size-5" />
-                            Get {campaign?.instantReward?.amountPerWinner} {campaign?.prizeType} Now
-                          </>
-                        ) : (
-                          <>
-                            <Gift className="size-5" />
-                            Join Giveaway
-                          </>
-                        )}
-                      </>
-                    )}
-                  </Button>
-                  {payoutError && (
-                    <p className="text-red-400 text-sm mt-2 text-center">{payoutError}</p>
+                <Button
+                  size="lg"
+                  className="w-full mt-6 rounded-full h-14 bg-gradient-to-r from-emerald-500 to-green-500 text-white hover:from-emerald-400 hover:to-green-400 font-semibold shadow-lg shadow-emerald-500/30 transition-all"
+                  onClick={claimReward}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="size-5 animate-spin mr-2" />
+                      Processing Payment...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="size-5 mr-2" />
+                      Get {campaign?.instantReward?.amountPerWinner || campaign?.prizeAmount || "0"} {campaign?.prizeType} Reward
+                    </>
                   )}
-                </>
+                </Button>
               )
             )}
 
-            {hasSubmitted && (
-              <div className="mt-6 p-4 bg-green-500/10 border border-green-500/20 rounded-2xl text-center">
-                <p className="text-green-400 flex items-center justify-center gap-2">
-                  <CheckCircle2 className="size-5" />
-                  You've joined this giveaway!
-                </p>
+            {payoutError && (
+              <p className="text-red-400 text-sm mt-2 text-center">{payoutError}</p>
+            )}
+
+            {hasSubmitted && rewardPaid && (
+              <div className="mt-6 p-4 rounded-2xl text-center bg-emerald-500/10 border border-emerald-500/20">
+                <div className="space-y-2">
+                  <p className="text-emerald-400 flex items-center justify-center gap-2 font-semibold">
+                    <Zap className="size-5" />
+                    Reward Paid! {rewardAmount} {campaign.prizeType}
+                  </p>
+                  <p className="text-white/40 text-xs">Check your wallet</p>
+                </div>
               </div>
             )}
           </div>
