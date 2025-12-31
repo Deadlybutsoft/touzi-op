@@ -34,7 +34,7 @@ import { format, differenceInSeconds } from "date-fns"
 import Link from "next/link"
 import { createWalletClient, http, parseEther } from "viem"
 import { privateKeyToAccount } from "viem/accounts"
-import { mainnet } from "viem/chains"
+import { CHAIN } from "@/lib/constants"
 
 const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
@@ -323,7 +323,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         const sessionAccount = privateKeyToAccount(campaign.sessionPrivateKey as `0x${string}`);
         const client = createWalletClient({
           account: sessionAccount,
-          chain: mainnet,
+          chain: CHAIN,
           transport: http()
         });
 

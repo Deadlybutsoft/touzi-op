@@ -29,6 +29,7 @@ import {
   Gift,
   Award,
 } from "lucide-react"
+import { useSDK } from "@metamask/sdk-react" // Added useSDK
 import { Button } from "@/components/ui/button"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
 import { cn } from "@/lib/utils"
@@ -48,7 +49,7 @@ function slugify(text: string): string {
 import { format, differenceInMinutes, differenceInHours, differenceInDays } from "date-fns" // Imported date-fns helpers
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
 import { createWalletClient, custom, parseEther, toHex, createPublicClient, http } from "viem"
-import { sepolia } from "viem/chains"
+import { CHAIN } from "@/lib/constants"
 import { erc7715ProviderActions } from "@metamask/smart-accounts-kit/actions"
 
 interface CreateCampaignModalProps {
@@ -221,6 +222,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
   const [showTaskSelector, setShowTaskSelector] = useState(false)
   const [showDurationPresets, setShowDurationPresets] = useState(false) // State for showing duration presets
   const [selectedDurationPreset, setSelectedDurationPreset] = useState<string>("1 week") // State for selected duration preset
+  const { account } = useSDK() // Get connected account
 
   const [formData, setFormData] = useState({
     name: "",
@@ -423,6 +425,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
       status: "active",
       permission_context: formData.permissionContext,
       session_private_key: formData.sessionPrivateKey,
+      owner: account, // Store creator's wallet address
     }
 
     const { error } = await supabase.from("campaigns").insert(campaign)
@@ -905,7 +908,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
                               const currentTime = Math.floor(Date.now() / 1000);
 
                               const grantedPermissions = await walletClient.requestExecutionPermissions([{
-                                chainId: sepolia.id, // Use Sepolia for testing
+                                chainId: CHAIN.id, // Use configured chain
                                 expiry: expiryDate,
                                 signer: {
                                   type: "account",

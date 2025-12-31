@@ -20,7 +20,8 @@ create table campaigns (
   status text default 'active',
   created_at timestamp with time zone default now(),
   permission_context jsonb, -- For advanced permissions
-  session_private_key text -- Encrypted session key (handle with care!)
+  session_private_key text, -- Encrypted session key (handle with care!)
+  owner text -- Wallet address of the campaign creator
 );
 
 -- Create Participants (Submissions) table
