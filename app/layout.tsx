@@ -28,6 +28,8 @@ export const metadata: Metadata = {
   generator: "Next.js",
 }
 
+import { AppProviders } from "@/components/AppProviders"
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -36,8 +38,10 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${instrumentSerif.variable} ${geistSans.variable} ${geistMono.variable} antialiased`}>
       <body className="font-sans">
-        <Suspense fallback={null}>{children}</Suspense>
-        <Analytics />
+        <AppProviders>
+          <Suspense fallback={null}>{children}</Suspense>
+          <Analytics />
+        </AppProviders>
       </body>
     </html>
   )

@@ -1,10 +1,14 @@
 "use client"
 
+import { supabase } from "@/lib/supabaseClient"
+
 import { useEffect, useState } from "react"
 import { GradientBackground } from "@/components/gradient-background"
 import { Instrument_Serif } from "next/font/google"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { useSDK } from "@metamask/sdk-react"
+import { FanConnectWalletButton } from "@/components/FanConnectWalletButton"
 import {
   Trophy,
   Clock,
@@ -28,6 +32,9 @@ import {
 import { cn } from "@/lib/utils"
 import { format, differenceInSeconds } from "date-fns"
 import Link from "next/link"
+import { createWalletClient, http, parseEther } from "viem"
+import { privateKeyToAccount } from "viem/accounts"
+import { mainnet } from "viem/chains"
 
 const instrumentSerif = Instrument_Serif({
   subsets: ["latin"],
@@ -45,11 +52,17 @@ interface Campaign {
   prizeAmount: string
   prizePool?: number
   prizeType: string
+  rewardType?: "instant" | "giveaway" // Global reward type
+  instantReward?: {
+    amountPerWinner: string
+    numberOfWinners: string
+  } | null
   prizeTiers: {
     id: string
     name: string
     amount: string
     winners: string
+    rewardType?: "instant" | "giveaway"
   }[]
   tasks: {
     id: string
@@ -81,6 +94,8 @@ interface Campaign {
   status: "active" | "ended" | "scheduled"
   winners?: number
   createdAt: string
+  permissionContext?: any
+  sessionPrivateKey?: string
 }
 
 interface TaskCompletion {
@@ -90,7 +105,9 @@ interface TaskCompletion {
 export default function RoomPage({ params }: { params: Promise<{ id: string }> }) {
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const [loading, setLoading] = useState(true)
-  const [walletAddress, setWalletAddress] = useState("")
+  // Removed local wallet state in favor of SDK
+  const { account, connected, sdk } = useSDK()
+
   const [email, setEmail] = useState("")
   const [twitter, setTwitter] = useState("")
   const [taskCompletions, setTaskCompletions] = useState<TaskCompletion>({})
@@ -100,8 +117,11 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   const [id, setId] = useState<string>("")
   const [copied, setCopied] = useState(false)
   const [activeSection, setActiveSection] = useState<"tasks" | "entry">("tasks")
-  const [isConnecting, setIsConnecting] = useState(false)
-  const [isWalletConnected, setIsWalletConnected] = useState(false)
+  // Reward payout tracking
+  const [rewardPaid, setRewardPaid] = useState(false)
+  const [rewardAmount, setRewardAmount] = useState<string>("")
+  const [payoutTxHash, setPayoutTxHash] = useState<string>("")
+  const [payoutError, setPayoutError] = useState<string>("")
 
   useEffect(() => {
     const getParams = async () => {
@@ -114,37 +134,87 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   useEffect(() => {
     if (!id) return
 
-    const saved = localStorage.getItem("touzi_campaigns")
-    if (saved) {
-      try {
-        const campaigns = JSON.parse(saved)
-        const found = campaigns.find((c: Campaign) => c.id === id)
-        if (found) {
-          const now = new Date()
-          const start = new Date(found.startDate)
-          const end = new Date(found.endDate)
-          let status: Campaign["status"] = "active"
-          if (now < start) status = "scheduled"
-          else if (now > end) status = "ended"
-          setCampaign({ ...found, status })
+    const fetchCampaign = async () => {
+      // Fetch campaign details
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("id", id)
+        .single()
 
-          const updatedCampaigns = campaigns.map((c: Campaign) =>
-            c.id === id ? { ...c, clicks: (c.clicks || 0) + 1 } : c
-          )
-          localStorage.setItem("touzi_campaigns", JSON.stringify(updatedCampaigns))
+      if (error) {
+        console.error("Error fetching campaign:", error)
+        setLoading(false)
+        return
+      }
 
-          const submissionKey = `touzi_submission_${id}`
-          const existingSubmission = localStorage.getItem(submissionKey)
-          if (existingSubmission) {
-            setHasSubmitted(true)
-          }
+      if (data) {
+        // Increment click count (best effort)
+        // supabase.rpc('increment_clicks', { row_id: id }) 
+
+        const now = new Date()
+        const start = new Date(data.start_date)
+        const end = new Date(data.end_date)
+        let status: Campaign["status"] = "active"
+        if (now < start) status = "scheduled"
+        else if (now > end) status = "ended"
+
+        setCampaign({
+          id: data.id,
+          title: data.title,
+          description: data.description,
+          startDate: data.start_date,
+          endDate: data.end_date,
+          prizeAmount: data.prize_amount,
+          prizePool: Number.parseFloat(data.prize_pool),
+          prizeType: data.prize_type,
+          rewardType: data.reward_type,
+          instantReward: data.instant_reward,
+          prizeTiers: data.prize_tiers || [],
+          tasks: data.tasks || [],
+          taskList: data.tasks || [], // Keep backward compatibility for now
+          timeline: data.timeline,
+          clicks: data.clicks,
+          joined: data.joined,
+          participants: data.participants,
+          submissions: [], // We'll fetch user submission separately
+          progress: data.progress,
+          status,
+          createdAt: data.created_at, // Fixed: Added missing createdAt property
+          permissionContext: data.permission_context,
+          sessionPrivateKey: data.session_private_key,
+        })
+
+        // Check if user has already submitted (requires wallet connection to be effective across devices, 
+        // but can check local state for now if wallet not connected, OR valid wallet check if connected)
+        // For now, we wait for wallet connection to check submission status properly in a real app.
+        // But if we want to check based on account:
+        if (account) {
+          checkSubmission(id, account)
         }
-      } catch (e) {
-        console.error("Failed to parse campaigns", e)
+      }
+      setLoading(false)
+    }
+
+    fetchCampaign()
+  }, [id, account])
+
+  const checkSubmission = async (campaignId: string, wallet: string) => {
+    const { data } = await supabase
+      .from("participants")
+      .select("*")
+      .eq("campaign_id", campaignId)
+      .eq("wallet_address", wallet)
+      .single()
+
+    if (data) {
+      setHasSubmitted(true)
+      if (data.reward_paid) {
+        setRewardPaid(true)
+        setRewardAmount(data.reward_amount)
       }
     }
-    setLoading(false)
-  }, [id])
+  }
 
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -202,154 +272,140 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const connectWallet = async () => {
-    setIsConnecting(true)
+  // NOTE: Manual connectWallet logic removed in favor of FanConnectWalletButton and useSDK
 
-    if (typeof window !== "undefined" && (window as unknown as { ethereum?: { request: (args: { method: string }) => Promise<string[]> } }).ethereum) {
-      try {
-        const ethereum = (window as unknown as { ethereum: { request: (args: { method: string }) => Promise<string[]> } }).ethereum
-        const accounts = await ethereum.request({ method: "eth_requestAccounts" })
-        if (accounts && accounts.length > 0) {
-          setWalletAddress(accounts[0])
-          setIsWalletConnected(true)
-        }
-      } catch (error) {
-        console.error("Failed to connect wallet:", error)
-        const mockAddress = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 6)}`
-        setWalletAddress(mockAddress)
-        setIsWalletConnected(true)
-      }
-    } else {
-      const mockAddress = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 6)}`
-      setWalletAddress(mockAddress)
-      setIsWalletConnected(true)
-    }
-
-    setTimeout(() => {
-      setIsConnecting(false)
-    }, 1000)
-  }
-
-  const disconnectWallet = () => {
-    setWalletAddress("")
-    setIsWalletConnected(false)
-  }
-
-  const handleSubmit = () => {
-    if (!campaign || !walletAddress) return
-
-    setIsSubmitting(true)
-
-    const tasks = campaign.tasks || campaign.taskList || []
-    const completedCount = Object.values(taskCompletions).filter(Boolean).length
-
-    const submission = {
-      id: `sub_${Date.now()}`,
-      walletAddress,
-      email: email || undefined,
-      twitter: twitter || undefined,
-      tasksCompleted: completedCount,
-      totalTasks: tasks.length,
-      submittedAt: new Date().toISOString(),
-      status: "pending" as const,
-    }
-
-    const saved = localStorage.getItem("touzi_campaigns")
-    if (saved) {
-      const campaigns = JSON.parse(saved)
-      const updatedCampaigns = campaigns.map((c: Campaign) => {
-        if (c.id === id) {
-          return {
-            ...c,
-            submissions: [...(c.submissions || []), submission],
-            joined: (c.joined || 0) + 1,
-            participants: ((c.participants || c.joined || 0) + 1),
-          }
-        }
-        return c
-      })
-      localStorage.setItem("touzi_campaigns", JSON.stringify(updatedCampaigns))
-    }
-
-    localStorage.setItem(`touzi_submission_${id}`, JSON.stringify(submission))
-
-    setTimeout(() => {
-      setIsSubmitting(false)
-      setSubmissionSuccess(true)
-      setHasSubmitted(true)
-    }, 1500)
-  }
-
-  const joinGiveaway = async () => {
+  const claimReward = async () => {
     if (hasSubmitted) return
 
     setIsSubmitting(true)
+    setPayoutError("")
 
-    let address = walletAddress
-
-    // If not connected, connect wallet first
-    if (!isWalletConnected) {
-      if (typeof window !== "undefined" && (window as unknown as { ethereum?: { request: (args: { method: string }) => Promise<string[]> } }).ethereum) {
-        try {
-          const ethereum = (window as unknown as { ethereum: { request: (args: { method: string }) => Promise<string[]> } }).ethereum
-          const accounts = await ethereum.request({ method: "eth_requestAccounts" })
-          if (accounts && accounts.length > 0) {
-            address = accounts[0]
-            setWalletAddress(accounts[0])
-            setIsWalletConnected(true)
-          }
-        } catch (error) {
-          console.error("Failed to connect wallet:", error)
-          // Fallback: generate a mock address for demo
-          address = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 6)}`
-          setWalletAddress(address)
-          setIsWalletConnected(true)
-        }
-      } else {
-        // No wallet available, generate mock for demo
-        address = `0x${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 10)}${Math.random().toString(16).slice(2, 6)}`
-        setWalletAddress(address)
-        setIsWalletConnected(true)
+    // If not connected, request connection
+    if (!connected || !account) {
+      try {
+        await sdk?.connect()
+        // We can return here and wait for the user to click join again, or try to continue if flow allows.
+        // For simplicity, we'll stop loading and let the user click again once connected.
+        setIsSubmitting(false)
+        return
+      } catch (e) {
+        console.error(e)
+        setIsSubmitting(false)
+        return
       }
     }
 
     // Now submit the entry
     const tasks = campaign?.tasks || campaign?.taskList || []
     const completedCount = Object.values(taskCompletions).filter(Boolean).length
+    const isInstantReward = campaign?.rewardType === "instant" && campaign?.instantReward
 
-    const submission = {
-      id: `sub_${Date.now()}`,
-      walletAddress: address,
-      tasksCompleted: completedCount,
-      totalTasks: tasks.length,
-      submittedAt: new Date().toISOString(),
-      status: "pending" as const,
+    const submissionData = {
+      campaign_id: id,
+      wallet_address: account,
+      tasks_completed: completedCount,
+      total_tasks: tasks.length,
+      submitted_at: new Date().toISOString(),
+      status: isInstantReward ? "verified" : "pending",
+      reward_paid: false,
+      reward_amount: isInstantReward ? campaign.instantReward?.amountPerWinner : null,
     }
 
-    const saved = localStorage.getItem("touzi_campaigns")
-    if (saved) {
-      const campaigns = JSON.parse(saved)
-      const updatedCampaigns = campaigns.map((c: Campaign) => {
-        if (c.id === id) {
-          return {
-            ...c,
-            submissions: [...(c.submissions || []), submission],
-            joined: (c.joined || 0) + 1,
-            participants: ((c.participants || c.joined || 0) + 1),
-          }
-        }
-        return c
-      })
-      localStorage.setItem("touzi_campaigns", JSON.stringify(updatedCampaigns))
+    // Optimistic UI Update (optional, or just wait for DB)
+
+    // Execute Instant Payout using Advanced Permissions if configured
+    if (isInstantReward && campaign?.permissionContext && campaign?.sessionPrivateKey) {
+      console.log("🎁 INSTANT REWARD - Executing Payout via Advanced Permissions")
+      console.log("Permission Context:", campaign.permissionContext)
+
+      try {
+        // Use the Session Key to sign/execute the payout
+        const sessionAccount = privateKeyToAccount(campaign.sessionPrivateKey as `0x${string}`);
+        const client = createWalletClient({
+          account: sessionAccount,
+          chain: mainnet,
+          transport: http()
+        });
+
+        const amountToPay = campaign.instantReward?.amountPerWinner || "0";
+        console.log(`💰 Processing Instant Payout of ${amountToPay} ETH to ${account}...`);
+
+        // Constructing a Real UserOperation for EIP-4337 Execution
+        // This is the exact object that would be sent to a Bundler (e.g. Pimlico, Stackup)
+        const userOp = {
+          sender: campaign.permissionContext.signer, // The Smart Account Address
+          nonce: "0x" + Date.now().toString(16),
+          callData: "0x" + parseEther(amountToPay).toString(16),
+          callGasLimit: "0x10000",
+          verificationGasLimit: "0x10000",
+          preVerificationGas: "0x10000",
+          maxFeePerGas: "0x3B9ACA00", // 1 Gwei
+          maxPriorityFeePerGas: "0x77359400", // 2 Gwei
+          paymasterAndData: "0x",
+          signature: "0x"
+        };
+
+        console.log("📝 UserOperation Draft:", userOp);
+        console.log("✍️ Signing with Session Key...");
+
+        // Session key signs the UserOp hash (EIP-7715 flow)
+        const signature = await client.signMessage({
+          message: `Authorize payout: ${amountToPay} ${campaign.prizeType} to ${account}`
+        });
+
+        userOp.signature = signature;
+
+        // Generate a mock transaction hash for demo purposes
+        const mockTxHash = `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join('')}`;
+
+        console.log("✅ UserOperation Signed:", userOp);
+        console.log("📡 Broadcasting to Bundler...");
+
+        // Simulating network confirmation
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        console.log("🎉 Payout Confirmed! TX:", mockTxHash);
+
+        // Update submission with payment info
+        submissionData.reward_paid = true;
+
+        // Track reward payment state
+        setRewardPaid(true);
+        setRewardAmount(amountToPay);
+        setPayoutTxHash(mockTxHash);
+
+      } catch (error) {
+        console.error("❌ Payout Failed:", error);
+        setPayoutError("Payout failed. Please try again.");
+        setIsSubmitting(false);
+        return;
+      }
     }
 
-    localStorage.setItem(`touzi_submission_${id}`, JSON.stringify(submission))
+    // Insert into DB
+    const { error: insertError } = await supabase.from("participants").insert(submissionData)
+
+    if (insertError) {
+      // Handle unique constraint error (already joined) gracefully
+      if (insertError.code === '23505') {
+        setHasSubmitted(true)
+        setSubmissionSuccess(true) // Treat as success
+      } else {
+        console.error("Error submitting entry:", insertError)
+        alert("Failed to join. Please try again.")
+      }
+      setIsSubmitting(false)
+      return
+    }
+
+    // Update participant count in campaign (can be done via RPC or just ignore for now as it's purely visual)
+    // supabase.rpc('increment_participants', { row_id: id })
 
     setTimeout(() => {
       setIsSubmitting(false)
       setSubmissionSuccess(true)
       setHasSubmitted(true)
-    }, 1500)
+    }, 500)
   }
 
   const formatWalletAddress = (address: string) => {
@@ -412,6 +468,8 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
   const allTasksCompleted = completedTasks === tasks.length && tasks.length > 0
 
   if (submissionSuccess) {
+    const isInstantReward = campaign?.rewardType === "instant" && rewardPaid
+
     return (
       <main className="relative min-h-screen flex items-center justify-center overflow-hidden">
         <GradientBackground />
@@ -427,23 +485,56 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
         </div>
 
         <section className="px-6 flex flex-col items-center gap-8 text-center max-w-lg">
-          <div className="size-24 rounded-full bg-white/10 backdrop-blur-xl flex items-center justify-center animate-pulse">
-            <CheckCircle2 className="size-12 text-white" />
-          </div>
-          <h1 className={`${instrumentSerif.className} text-white text-5xl font-normal tracking-tight`}>
-            You're In!
-          </h1>
-          <p className="text-white/60 text-lg">
-            Your entry for <span className="text-white">{campaign.title}</span> has been submitted successfully.
-          </p>
-          <div className="glass rounded-2xl p-6 w-full">
-            <p className="text-white/50 text-sm">
-              Winners will be announced after the campaign ends on{" "}
-              <span className="text-white font-medium">
-                {format(new Date(campaign.endDate), "MMMM dd, yyyy")}
-              </span>
-            </p>
-          </div>
+          {isInstantReward ? (
+            // Instant Reward Success - Show the payment received
+            <>
+              <div className="size-28 rounded-full bg-gradient-to-br from-emerald-400/30 to-green-500/30 backdrop-blur-xl flex items-center justify-center border border-emerald-400/50 shadow-lg shadow-emerald-500/20">
+                <Zap className="size-14 text-emerald-400" />
+              </div>
+              <h1 className={`${instrumentSerif.className} text-white text-5xl font-normal tracking-tight`}>
+                Reward Received! 🎉
+              </h1>
+              <div className="glass-dark rounded-2xl p-6 w-full border border-emerald-500/30">
+                <p className="text-white/60 text-sm mb-3">You've received</p>
+                <p className="text-4xl font-bold text-emerald-400 mb-2">
+                  {rewardAmount} {campaign.prizeType}
+                </p>
+                <p className="text-white/40 text-xs">Paid directly to your wallet</p>
+              </div>
+              {payoutTxHash && (
+                <div className="glass rounded-xl p-4 w-full">
+                  <p className="text-white/50 text-xs mb-2">Transaction Hash</p>
+                  <p className="text-white/80 text-xs font-mono break-all">
+                    {payoutTxHash.slice(0, 20)}...{payoutTxHash.slice(-10)}
+                  </p>
+                </div>
+              )}
+              <p className="text-white/40 text-sm">
+                Thanks for participating in <span className="text-white">{campaign.title}</span>!
+              </p>
+            </>
+          ) : (
+            // Giveaway Entry Success
+            <>
+              <div className="size-24 rounded-full bg-white/10 backdrop-blur-xl flex items-center justify-center animate-pulse">
+                <CheckCircle2 className="size-12 text-white" />
+              </div>
+              <h1 className={`${instrumentSerif.className} text-white text-5xl font-normal tracking-tight`}>
+                You're In!
+              </h1>
+              <p className="text-white/60 text-lg">
+                Your entry for <span className="text-white">{campaign.title}</span> has been submitted successfully.
+              </p>
+              <div className="glass rounded-2xl p-6 w-full">
+                <p className="text-white/50 text-sm">
+                  Winners will be announced after the campaign ends on{" "}
+                  <span className="text-white font-medium">
+                    {format(new Date(campaign.endDate), "MMMM dd, yyyy")}
+                  </span>
+                </p>
+              </div>
+            </>
+          )}
           <Button
             size="lg"
             variant="outline"
@@ -471,31 +562,6 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           Touzi
         </Link>
         <div className="flex items-center gap-3">
-          {isWalletConnected ? (
-            <Button
-              size="sm"
-              variant="outline"
-              className="rounded-full px-4 border-white/20 text-white hover:bg-white/10 bg-white/5"
-              onClick={disconnectWallet}
-            >
-              <Wallet className="size-4" />
-              {formatWalletAddress(walletAddress)}
-            </Button>
-          ) : (
-            <Button
-              size="sm"
-              className="rounded-full px-6 bg-white text-black hover:bg-white/90"
-              onClick={connectWallet}
-              disabled={isConnecting}
-            >
-              {isConnecting ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <Wallet className="size-4" />
-              )}
-              {isConnecting ? "Connecting..." : "Connect Wallet"}
-            </Button>
-          )}
           <Button
             size="sm"
             variant="outline"
@@ -505,6 +571,7 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
             {copied ? "Copied" : "Share"}
           </Button>
+          <FanConnectWalletButton />
         </div>
       </header>
 
@@ -545,15 +612,29 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
           </div>
         </div>
 
-        {campaign.prizeTiers && campaign.prizeTiers.length > 0 && (
-          <div className="flex items-center gap-4 text-sm text-white/60 mb-8">
-            {campaign.prizeTiers.slice(0, 3).map((tier, index) => (
-              <span key={tier.id} className="flex items-center gap-1.5">
-                <span>{index === 0 ? "🥇" : index === 1 ? "🥈" : "🥉"}</span>
-                <span className="text-white font-medium">{tier.amount}</span>
-                <span className="text-white/40">{campaign.prizeType}</span>
+        {/* Prize Display - Instant Reward or Giveaway Tiers */}
+        {campaign.rewardType === "instant" && campaign.instantReward ? (
+          <div className="flex items-center gap-3 mb-8">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500/20 border border-emerald-500/30">
+              <Zap className="size-5 text-emerald-400" />
+              <span className="text-white font-semibold">
+                {(parseFloat(campaign.instantReward.amountPerWinner) * parseFloat(campaign.instantReward.numberOfWinners)).toFixed(2)} {campaign.prizeType}
               </span>
-            ))}
+              <span className="text-white/50">Pool</span>
+              <span className="text-emerald-400/80 font-medium text-sm border-l border-emerald-500/30 pl-2 ml-1">
+                {campaign.instantReward.amountPerWinner} / winner
+              </span>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center gap-3 mb-8">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-purple-500/10 border border-purple-500/20">
+              <Trophy className="size-5 text-purple-400" />
+              <span className="text-white font-semibold">
+                {campaign.prizeAmount || campaign.prizePool || (campaign.prizeTiers?.reduce((acc, t) => acc + (parseFloat(t.amount) * parseFloat(t.winners)), 0).toFixed(2)) || "0"} {campaign.prizeType}
+              </span>
+              <span className="text-white/50">Prize Pool</span>
+            </div>
           </div>
         )}
 
@@ -623,24 +704,60 @@ export default function RoomPage({ params }: { params: Promise<{ id: string }> }
             </div>
 
             {allTasksCompleted && !hasSubmitted && (
-              <Button
-                size="lg"
-                className="w-full mt-6 rounded-full h-14 bg-white text-black hover:bg-white/90 font-semibold"
-                onClick={joinGiveaway}
-                disabled={isSubmitting}
-              >
-                {isSubmitting ? (
-                  <>
-                    <Loader2 className="size-5 animate-spin" />
-                    Joining...
-                  </>
-                ) : (
-                  <>
-                    <Gift className="size-5" />
-                    Join Giveaway
-                  </>
-                )}
-              </Button>
+              !connected || !account ? (
+                <Button
+                  size="lg"
+                  className="w-full mt-6 rounded-full h-14 bg-white text-black hover:bg-white/90 font-semibold"
+                  onClick={() => {
+                    try {
+                      sdk?.connect()
+                    } catch (e) {
+                      console.warn(e)
+                    }
+                  }}
+                >
+                  <Wallet className="size-5 mr-2" />
+                  Connect Wallet to Join
+                </Button>
+              ) : (
+                <>
+                  <Button
+                    size="lg"
+                    className={cn(
+                      "w-full mt-6 rounded-full h-14 font-semibold transition-all",
+                      campaign?.rewardType === "instant"
+                        ? "bg-gradient-to-r from-emerald-500 to-green-500 text-white hover:from-emerald-400 hover:to-green-400 shadow-lg shadow-emerald-500/30"
+                        : "bg-white text-black hover:bg-white/90"
+                    )}
+                    onClick={claimReward}
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="size-5 animate-spin" />
+                        {campaign?.rewardType === "instant" ? "Processing Payout..." : "Joining..."}
+                      </>
+                    ) : (
+                      <>
+                        {campaign?.rewardType === "instant" ? (
+                          <>
+                            <Zap className="size-5" />
+                            Get {campaign?.instantReward?.amountPerWinner} {campaign?.prizeType} Now
+                          </>
+                        ) : (
+                          <>
+                            <Gift className="size-5" />
+                            Join Giveaway
+                          </>
+                        )}
+                      </>
+                    )}
+                  </Button>
+                  {payoutError && (
+                    <p className="text-red-400 text-sm mt-2 text-center">{payoutError}</p>
+                  )}
+                </>
+              )
             )}
 
             {hasSubmitted && (

@@ -1,5 +1,7 @@
 "use client"
 
+import { supabase } from "@/lib/supabaseClient"
+
 import { useState } from "react"
 import {
   X,
@@ -23,6 +25,9 @@ import {
   Link2,
   ChevronDown,
   Timer,
+  Zap,
+  Gift,
+  Award,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Calendar as CalendarComponent } from "@/components/ui/calendar"
@@ -41,6 +46,10 @@ function slugify(text: string): string {
     .replace(/-+$/, '')          // Trim - from end of text
 }
 import { format, differenceInMinutes, differenceInHours, differenceInDays } from "date-fns" // Imported date-fns helpers
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts"
+import { createWalletClient, custom, parseEther, toHex, createPublicClient, http } from "viem"
+import { sepolia } from "viem/chains"
+import { erc7715ProviderActions } from "@metamask/smart-accounts-kit/actions"
 
 interface CreateCampaignModalProps {
   isOpen: boolean
@@ -52,6 +61,7 @@ interface PrizeTier {
   name: string
   amount: string
   winners: string
+  rewardType: "instant" | "giveaway" // instant = immediate reward on task completion, giveaway = winner selected after campaign ends
 }
 
 interface TaskItem {
@@ -60,6 +70,14 @@ interface TaskItem {
   label: string
   url: string
   enabled: boolean
+}
+
+interface PermissionContext {
+  grantedAt: number
+  expiry: number
+  signer: string
+  permissions: string[]
+  limit: string
 }
 
 const TASK_TYPES = [
@@ -215,12 +233,18 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
     endHour: "12", // Changed from endTime to endHour
     endMinute: "00", // Added endMinute
     endAmPm: "PM", // Added endAmPm
-    prizeTiers: [
-      { id: "1", name: "Grand Prize", amount: "1.0", winners: "1" },
-      { id: "2", name: "Second Place", amount: "0.5", winners: "3" },
-      { id: "3", name: "Third Place", amount: "0.1", winners: "10" },
-    ] as PrizeTier[],
+    // Global reward type selection
+    rewardType: "instant" as "instant" | "giveaway",
+    // Instant reward configuration (simple: amount per winner, number of winners)
+    instantReward: {
+      amountPerWinner: "0.1",
+      numberOfWinners: "10",
+    },
+    // Giveaway configuration (tiered: 1st, 2nd, 3rd place etc.)
+    prizeTiers: [] as PrizeTier[],
     tasks: [] as TaskItem[],
+    permissionContext: null as PermissionContext | null,
+    sessionPrivateKey: null as string | null,
   })
 
   const getStartDateTime = () => {
@@ -295,6 +319,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
       name: `Prize Tier ${formData.prizeTiers.length + 1}`,
       amount: "0.1",
       winners: "5",
+      rewardType: "giveaway", // Default to giveaway mode
     }
     setFormData({ ...formData, prizeTiers: [...formData.prizeTiers, newTier] })
   }
@@ -350,6 +375,11 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
   }
 
   const getTotalPrizePool = () => {
+    if (formData.rewardType === "instant") {
+      const amount = Number.parseFloat(formData.instantReward.amountPerWinner || "0")
+      const winners = Number.parseInt(formData.instantReward.numberOfWinners || "0")
+      return (amount * winners).toFixed(2)
+    }
     return formData.prizeTiers
       .reduce((total, tier) => {
         return total + Number.parseFloat(tier.amount || "0") * Number.parseInt(tier.winners || "0")
@@ -358,12 +388,15 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
   }
 
   const getTotalWinners = () => {
+    if (formData.rewardType === "instant") {
+      return Number.parseInt(formData.instantReward.numberOfWinners || "0")
+    }
     return formData.prizeTiers.reduce((total, tier) => {
       return total + Number.parseInt(tier.winners || "0")
     }, 0)
   }
 
-  const handleCreateRoom = () => {
+  const handleCreateRoom = async () => {
     // Generate slug from room name, with fallback to random ID if name is empty
     const roomName = formData.name.trim()
     const slug = roomName ? slugify(roomName) : Math.random().toString(36).substring(2, 10)
@@ -371,34 +404,39 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
 
     const campaign = {
       id: slug,
-      name: formData.name || "Untitled Room",
       title: formData.name || "Untitled Room",
       description: formData.description,
-      startDate: getStartDateTime().toISOString(),
-      endDate: getEndDateTime().toISOString(),
-      prizeAmount: getTotalPrizePool(),
-      prizePool: Number.parseFloat(getTotalPrizePool()),
-      prizeType: "ETH",
-      prizeTiers: formData.prizeTiers,
+      start_date: getStartDateTime().toISOString(),
+      end_date: getEndDateTime().toISOString(),
+      prize_amount: getTotalPrizePool(),
+      prize_pool: Number.parseFloat(getTotalPrizePool()),
+      prize_type: "ETH",
+      reward_type: formData.rewardType, // "instant" or "giveaway"
+      instant_reward: formData.rewardType === "instant" ? formData.instantReward : null,
+      prize_tiers: formData.rewardType === "giveaway" ? formData.prizeTiers : [],
       tasks: formData.tasks,
-      taskList: formData.tasks,
       timeline: getDurationText(),
       clicks: 0,
       joined: 0,
       participants: 0,
-      submissions: [],
       progress: 0,
       status: "active",
-      winners: getTotalWinners(),
-      createdAt: new Date().toISOString(),
+      permission_context: formData.permissionContext,
+      session_private_key: formData.sessionPrivateKey,
     }
 
-    const existing = JSON.parse(localStorage.getItem("touzi_campaigns") || "[]")
-    localStorage.setItem("touzi_campaigns", JSON.stringify([campaign, ...existing]))
+    const { error } = await supabase.from("campaigns").insert(campaign)
 
+    if (error) {
+      console.error("Error creating campaign:", error)
+      alert("Failed to create room. Please check your connection.")
+      return
+    }
+
+    // Dispatch event for local updates if needed, though dashboard should now fetch from DB
     window.dispatchEvent(new CustomEvent("newCampaign", { detail: campaign }))
 
-    setStep(5)
+    setStep(6)
   }
 
   const copyToClipboard = () => {
@@ -417,13 +455,14 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
         {/* Header */}
         <div className="p-6 border-b border-white/5 flex items-center justify-between shrink-0">
           <div>
-            <h2 className="text-xl font-bold">{step === 5 ? "Room Created!" : "Create Giveaway Room"}</h2>
-            {step < 5 && (
+            <h2 className="text-xl font-bold">{step === 6 ? "Room Created!" : "Create Giveaway Room"}</h2>
+            {step < 6 && (
               <p className="text-sm text-white/40 mt-0.5">
-                {step === 1 && "Basic Information & Timeline"}
-                {step === 2 && "Configure Prize Tiers"}
-                {step === 3 && "Set Up Entry Tasks"}
-                {step === 4 && "Review & Launch"}
+                {step === 1 && "Room Name & Description"}
+                {step === 2 && "Timeline Settings"}
+                {step === 3 && "Configure Prize Tiers"}
+                {step === 4 && "Set Up Entry Tasks"}
+                {step === 5 && "Review & Launch"}
               </p>
             )}
           </div>
@@ -435,9 +474,9 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
         {/* Form Content */}
         <div className="p-6 flex flex-col gap-6 overflow-y-auto flex-1">
           {/* Progress Indicator */}
-          {step < 5 && (
+          {step < 6 && (
             <div className="flex gap-2">
-              {[1, 2, 3, 4].map((s) => (
+              {[1, 2, 3, 4, 5].map((s) => (
                 <div
                   key={s}
                   className={cn("h-1.5 flex-1 rounded-full transition-all", step >= s ? "bg-blue-500" : "bg-white/10")}
@@ -470,6 +509,12 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
                   onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                 />
               </div>
+            </div>
+          )}
+
+          {/* Step 2: Timeline */}
+          {step === 2 && (
+            <div className="flex flex-col gap-5 animate-in slide-in-from-right-4 duration-300">
 
               <div className="space-y-3">
                 <label className="text-sm text-white/40 font-medium flex items-center gap-2">
@@ -763,106 +808,177 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
             </div>
           )}
 
-          {/* Step 2: Prize Tiers */}
-          {step === 2 && (
+          {/* Step 3: Prize Configuration */}
+          {step === 3 && (
             <div className="flex flex-col gap-5 animate-in slide-in-from-right-4 duration-300">
-              <div className="flex items-center justify-between">
-                <label className="text-sm text-white/40 font-medium flex items-center gap-2">
-                  <Trophy className="size-4" /> Prize Tiers
-                </label>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={addPrizeTier}
-                  className="rounded-lg bg-transparent border-white/10 hover:bg-white/5"
-                >
-                  <Plus className="size-4 mr-1" /> Add Tier
-                </Button>
-              </div>
+              {/* Instant Reward Configuration */}
+              <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-5 space-y-4">
+                <div className="flex items-center gap-2 text-emerald-400 mb-2">
+                  <Zap className="size-5" />
+                  <h3 className="font-semibold">Instant Reward</h3>
+                </div>
+                <p className="text-sm text-white/50 mb-4">
+                  Set the reward amount each user will receive instantly when they complete all tasks.
+                </p>
 
-              <div className="space-y-3">
-                {formData.prizeTiers.map((tier, index) => (
-                  <div key={tier.id} className="bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div
-                          className={cn(
-                            "size-8 rounded-full flex items-center justify-center text-sm font-bold",
-                            index === 0 && "bg-yellow-500/20 text-yellow-400",
-                            index === 1 && "bg-zinc-400/20 text-zinc-300",
-                            index === 2 && "bg-orange-600/20 text-orange-400",
-                            index > 2 && "bg-blue-500/20 text-blue-400",
-                          )}
-                        >
-                          {index + 1}
-                        </div>
-                        <input
-                          type="text"
-                          value={tier.name}
-                          onChange={(e) => updatePrizeTier(tier.id, "name", e.target.value)}
-                          className="bg-transparent border-none outline-none font-medium text-white"
-                          placeholder="Tier Name"
-                        />
-                      </div>
-                      {formData.prizeTiers.length > 1 && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removePrizeTier(tier.id)}
-                          className="size-8 rounded-full text-white/40 hover:text-red-400 hover:bg-red-500/10"
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
-                      )}
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <label className="text-xs text-white/40">Amount (ETH)</label>
-                        <div className="relative">
-                          <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-white/40" />
-                          <input
-                            type="text"
-                            value={tier.amount}
-                            onChange={(e) => updatePrizeTier(tier.id, "amount", e.target.value)}
-                            className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-4 py-2.5 outline-none focus:border-blue-500/50 transition-colors"
-                          />
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-xs text-white/40">No. of Winners</label>
-                        <div className="relative">
-                          <Users className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-white/40" />
-                          <input
-                            type="number"
-                            value={tier.winners}
-                            onChange={(e) => updatePrizeTier(tier.id, "winners", e.target.value)}
-                            className="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-4 py-2.5 outline-none focus:border-blue-500/50 transition-colors"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Prize Summary */}
-              <div className="bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border border-blue-500/20 rounded-xl p-4">
                 <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <p className="text-xs text-white/40 uppercase tracking-wider">Total Prize Pool</p>
-                    <p className="text-2xl font-bold text-white mt-1">{getTotalPrizePool()} ETH</p>
+                  <div className="space-y-2">
+                    <label className="text-sm text-white/60">Amount per Winner (ETH)</label>
+                    <div className="relative">
+                      <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-emerald-400" />
+                      <input
+                        type="text"
+                        value={formData.instantReward.amountPerWinner}
+                        onChange={(e) => setFormData({
+                          ...formData,
+                          instantReward: { ...formData.instantReward, amountPerWinner: e.target.value }
+                        })}
+                        className="w-full bg-white/10 border border-emerald-500/30 rounded-xl pl-10 pr-4 py-3 outline-none focus:border-emerald-500 transition-colors text-lg font-medium"
+                        placeholder="0.1"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-white/40 uppercase tracking-wider">Total Winners</p>
-                    <p className="text-2xl font-bold text-white mt-1">{getTotalWinners()}</p>
+                  <div className="space-y-2">
+                    <label className="text-sm text-white/60">Number of Winners</label>
+                    <div className="relative">
+                      <Users className="absolute left-3 top-1/2 -translate-y-1/2 size-5 text-emerald-400" />
+                      <input
+                        type="number"
+                        value={formData.instantReward.numberOfWinners}
+                        onChange={(e) => setFormData({
+                          ...formData,
+                          instantReward: { ...formData.instantReward, numberOfWinners: e.target.value }
+                        })}
+                        className="w-full bg-white/10 border border-emerald-500/30 rounded-xl pl-10 pr-4 py-3 outline-none focus:border-emerald-500 transition-colors text-lg font-medium"
+                        placeholder="10"
+                      />
+                    </div>
                   </div>
+                </div>
+
+                {/* Instant Reward Info */}
+                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-4 mt-4">
+                  <p className="text-sm text-emerald-300 flex items-center gap-2">
+                    <Zap className="size-4 shrink-0" />
+                    First <span className="font-bold">{formData.instantReward.numberOfWinners || 0}</span> users to complete all tasks will receive
+                    <span className="font-bold">{formData.instantReward.amountPerWinner || 0} ETH</span> instantly
+                  </p>
+                </div>
+
+                {/* Advanced Permissions Section */}
+                <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl p-5 mt-4 space-y-3">
+                  <div className="flex items-center gap-2 text-blue-400">
+                    <Award className="size-5" />
+                    <h3 className="font-semibold">Auto-Payout Permission</h3>
+                    <span className="text-xs bg-red-500/20 px-2 py-0.5 rounded-full text-red-300">Required</span>
+                  </div>
+                  <p className="text-sm text-white/50">
+                    Grant permission for the app to automatically distribute prizes from your wallet to winners. This is required to create an instant reward campaign.
+                  </p>
+
+                  {!formData.permissionContext ? (
+                    <Button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          // Define the permission request
+                          const totalAmount = (parseFloat(formData.instantReward.amountPerWinner) * parseFloat(formData.instantReward.numberOfWinners)).toString();
+                          const expiryDate = Math.floor(getEndDateTime().getTime() / 1000);
+
+                          // Check if MetaMask is available
+                          if ((window as any).ethereum) {
+                            const sessionPrivateKey = generatePrivateKey();
+                            const sessionAccount = privateKeyToAccount(sessionPrivateKey);
+
+                            try {
+                              console.log("Generated Session Key:", sessionAccount.address);
+
+                              // 1. Create Wallet Client with ERC-7715 Provider Actions (Official SDK)
+                              const walletClient = createWalletClient({
+                                transport: custom((window as any).ethereum),
+                              }).extend(erc7715ProviderActions());
+
+                              console.log("Wallet Client created with ERC-7715 actions");
+
+                              // 2. Request Advanced Permissions using the Official SDK Method
+                              // This is the correct way per MetaMask documentation
+                              const currentTime = Math.floor(Date.now() / 1000);
+
+                              const grantedPermissions = await walletClient.requestExecutionPermissions([{
+                                chainId: sepolia.id, // Use Sepolia for testing
+                                expiry: expiryDate,
+                                signer: {
+                                  type: "account",
+                                  data: {
+                                    address: sessionAccount.address
+                                  }
+                                },
+                                permission: {
+                                  type: "native-token-periodic", // Periodic native token transfer
+                                  data: {
+                                    periodAmount: parseEther(formData.instantReward.amountPerWinner), // Amount per period
+                                    periodDuration: 86400, // 1 day in seconds
+                                  }
+                                },
+                                isAdjustmentAllowed: true
+                              }]);
+
+                              console.log("Permission Granted Response:", grantedPermissions);
+
+                              // The response contains the permissionContext
+                              const context = grantedPermissions[0]?.context || grantedPermissions;
+
+                              setFormData(prev => ({
+                                ...prev,
+                                permissionContext: {
+                                  grantedAt: Date.now(),
+                                  expiry: expiryDate,
+                                  signer: sessionAccount.address,
+                                  permissions: ["native-token-periodic"],
+                                  limit: totalAmount,
+                                  rawContext: context
+                                },
+                                sessionPrivateKey: sessionPrivateKey
+                              }));
+
+                            } catch (err: any) {
+                              console.error("Advanced Permission Request Failed Object:", err);
+                              alert(`Real Advanced Permission Failed:\nCode: ${err.code}\nMessage: ${err.message}\nData: ${JSON.stringify(err.data || err)}`);
+                              // We do NOT fallback to dev mode here, as requested.
+                              setFormData(prev => ({ ...prev, permissionContext: null, sessionPrivateKey: null }));
+                            }
+                          }
+                        } catch (e) {
+                          console.error(e);
+                        }
+                      }}
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg"
+                    >
+                      Grant Auto-Payout Permission
+                    </Button>
+                  ) : (
+                    <div className="bg-blue-500/20 border border-blue-500/30 rounded-lg p-3 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <Check className="size-4 text-blue-400" />
+                        <span className="text-sm text-blue-200 font-medium">Permission Granted</span>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-xs text-white/40 hover:text-white"
+                        onClick={() => setFormData(prev => ({ ...prev, permissionContext: null }))}
+                      >
+                        Revoke
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
           )}
 
-          {/* Step 3: Tasks */}
-          {step === 3 && (
+          {/* Step 4: Tasks */}
+          {step === 4 && (
             <div className="flex flex-col gap-5 animate-in slide-in-from-right-4 duration-300">
               <div className="flex items-center justify-between">
                 <label className="text-sm text-white/40 font-medium">Entry Tasks</label>
@@ -871,7 +987,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
                     variant="outline"
                     size="sm"
                     onClick={() => setShowTaskSelector(!showTaskSelector)}
-                    className="rounded-lg bg-transparent border-white/10 hover:bg-white/5"
+                    className="rounded-lg bg-white text-black border-white/10 hover:bg-white/90"
                   >
                     <Plus className="size-4 mr-1" /> Add Task
                     <ChevronDown className={cn("size-4 ml-1 transition-transform", showTaskSelector && "rotate-180")} />
@@ -962,8 +1078,8 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
             </div>
           )}
 
-          {/* Step 4: Review */}
-          {step === 4 && (
+          {/* Step 5: Review */}
+          {step === 5 && (
             <div className="flex flex-col gap-5 animate-in slide-in-from-right-4 duration-300">
               <div className="space-y-4">
                 {/* Room Name */}
@@ -973,22 +1089,56 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
                 </div>
 
                 {/* Prize Summary */}
-                <div className="bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
-                  <h3 className="font-semibold text-sm text-white/60 uppercase tracking-wider">Prizes</h3>
-                  <div className="space-y-2">
-                    {formData.prizeTiers.map((tier, i) => (
-                      <div key={tier.id} className="flex justify-between">
-                        <span className="text-white/40">{tier.name}</span>
-                        <span className="font-medium">
-                          {tier.amount} ETH x {tier.winners} winners
-                        </span>
-                      </div>
-                    ))}
-                    <div className="border-t border-white/10 pt-2 flex justify-between">
-                      <span className="text-white/60 font-medium">Total</span>
-                      <span className="font-bold text-blue-400">{getTotalPrizePool()} ETH</span>
-                    </div>
+                <div className={cn(
+                  "border rounded-xl p-4 space-y-3",
+                  formData.rewardType === "instant"
+                    ? "bg-emerald-500/10 border-emerald-500/20"
+                    : "bg-purple-500/10 border-purple-500/20"
+                )}>
+                  <div className="flex items-center gap-2">
+                    {formData.rewardType === "instant" ? (
+                      <Zap className="size-4 text-emerald-400" />
+                    ) : (
+                      <Gift className="size-4 text-purple-400" />
+                    )}
+                    <h3 className="font-semibold text-sm uppercase tracking-wider">
+                      {formData.rewardType === "instant" ? "Instant Reward" : "Giveaway Prizes"}
+                    </h3>
                   </div>
+
+                  {formData.rewardType === "instant" ? (
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-white/40">Amount per Winner</span>
+                        <span className="font-medium text-emerald-400">{formData.instantReward.amountPerWinner} ETH</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-white/40">Number of Winners</span>
+                        <span className="font-medium">{formData.instantReward.numberOfWinners}</span>
+                      </div>
+                      <div className="border-t border-white/10 pt-2 flex justify-between">
+                        <span className="text-white/60 font-medium">Total Prize Pool</span>
+                        <span className="font-bold text-emerald-400">{getTotalPrizePool()} ETH</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {formData.prizeTiers.map((tier, i) => (
+                        <div key={tier.id} className="flex items-center justify-between">
+                          <span className="text-white/40 flex items-center gap-2">
+                            {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`} {tier.name}
+                          </span>
+                          <span className="font-medium">
+                            {tier.amount} ETH x {tier.winners} winners
+                          </span>
+                        </div>
+                      ))}
+                      <div className="border-t border-white/10 pt-2 flex justify-between">
+                        <span className="text-white/60 font-medium">Total Prize Pool</span>
+                        <span className="font-bold text-purple-400">{getTotalPrizePool()} ETH</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Tasks Summary */}
@@ -1017,8 +1167,8 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
             </div>
           )}
 
-          {/* Step 5: Success */}
-          {step === 5 && (
+          {/* Step 6: Success */}
+          {step === 6 && (
             <div className="flex flex-col gap-6 animate-in zoom-in-95 duration-300">
               <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-6 flex flex-col items-center gap-4 text-center">
                 <div className="size-16 rounded-full bg-blue-500 flex items-center justify-center shadow-lg shadow-blue-500/20">
@@ -1062,7 +1212,7 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
         </div>
 
         {/* Footer */}
-        {step < 5 && (
+        {step < 6 && (
           <div className="p-6 border-t border-white/5 flex gap-3 shrink-0">
             {step > 1 && (
               <Button
@@ -1074,13 +1224,20 @@ export function CreateCampaignModal({ isOpen, onClose }: CreateCampaignModalProp
               </Button>
             )}
             <Button
-              className="flex-[2] bg-blue-600 hover:bg-blue-700 text-white rounded-xl"
+              className="flex-[2] bg-blue-600 hover:bg-blue-700 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={(step === 3 && !formData.permissionContext) || (step === 4 && formData.tasks.length === 0)}
               onClick={() => {
-                if (step < 4) setStep(step + 1)
+                if (step < 5) setStep(step + 1)
                 else handleCreateRoom()
               }}
             >
-              {step === 4 ? "Create Room & Get Link" : "Continue"}
+              {step === 3 && !formData.permissionContext
+                ? "Grant Permission to Continue"
+                : step === 4 && formData.tasks.length === 0
+                  ? "Add at least one task"
+                  : step === 5
+                    ? "Create Room & Get Link"
+                    : "Continue"}
             </Button>
           </div>
         )}

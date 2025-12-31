@@ -25,6 +25,7 @@ export interface Campaign {
     name: string
     amount: number
     winners: number
+    rewardType?: "instant" | "giveaway"
   }[]
   taskList?: {
     type: string

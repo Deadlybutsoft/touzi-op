@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils"
 import { useState, useEffect } from "react"
 import { CreateCampaignModal } from "@/components/create-campaign-modal"
 import { Button } from "@/components/ui/button"
+import { ConnectWalletButton } from "@/components/ConnectWalletButton"
 
 interface Room {
   id: string
@@ -63,10 +64,7 @@ export default function DashboardLayout({
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="flex items-center bg-white/5 border border-white/10 rounded-full py-1 pb-1 flex-row pl-[17px] pr-1 mx-[-14px] gap-4">
-            <span className="text-xs font-medium text-white/60">0x71...4a2btr45yy5656try56576565776</span>
-            <div className="size-7 rounded-full bg-gradient-to-tr from-green-400 to-emerald-500 border border-white/20 flex-shrink-0" />
-          </div>
+          <ConnectWalletButton />
         </div>
       </header>
 

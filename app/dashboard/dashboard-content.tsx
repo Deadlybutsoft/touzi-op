@@ -1,5 +1,7 @@
 "use client"
 
+import { supabase } from "@/lib/supabaseClient"
+
 import { Plus, Trophy, MousePointer2, Users2, Timer, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { CreateCampaignModal } from "@/components/create-campaign-modal"
@@ -51,35 +53,70 @@ export default function DashboardContent() {
   })
 
   useEffect(() => {
-    const saved = localStorage.getItem("touzi_campaigns")
-    if (saved) {
-      const parsed: Campaign[] = JSON.parse(saved)
-      const updated = parsed.map((c) => {
-        const now = new Date()
-        const start = new Date(c.startDate)
-        const end = new Date(c.endDate)
-        let status: Campaign["status"] = "active"
-        if (now < start) status = "scheduled"
-        else if (now > end) status = "ended"
-        return { ...c, status }
-      })
-      setCampaigns(updated)
-      localStorage.setItem("touzi_campaigns", JSON.stringify(updated))
+    const fetchCampaigns = async () => {
+      const { data, error } = await supabase.from("campaigns").select("*").order("created_at", { ascending: false })
 
-      const totalClicks = updated.reduce((acc, c) => acc + (c.clicks || 0), 0)
-      const totalJoined = updated.reduce((acc, c) => acc + (c.joined || 0), 0)
-      const activeCampaigns = updated.filter((c) => c.status === "active").length
-      const conversion = totalClicks > 0 ? (totalJoined / totalClicks) * 100 : 0
-      const totalPrizePool = updated.reduce((acc, c) => acc + Number.parseFloat(c.prizeAmount || "0"), 0)
+      if (error) {
+        console.error("Error fetching campaigns:", error)
+        return
+      }
 
-      setStats({
-        clicks: totalClicks,
-        joined: totalJoined,
-        conversion: Number(conversion.toFixed(1)),
-        activeCampaigns,
-        totalPrizePool,
-      })
+      if (data) {
+        // Map DB fields to Component state format if necessary
+        // DB uses snake_case, but we can map them back to camelCase for the UI or update UI to use snake_case
+        // For simplicity, let's map them to the interface expected by the component
+        const mappedCampaigns: Campaign[] = data.map((c: any) => ({
+          id: c.id,
+          title: c.title,
+          description: c.description,
+          startDate: c.start_date,
+          endDate: c.end_date,
+          prizeAmount: c.prize_amount,
+          prizeType: c.prize_type,
+          prizeTiers: c.prize_tiers || [],
+          tasks: c.tasks || [],
+          timeline: c.timeline,
+          clicks: c.clicks,
+          joined: c.joined,
+          submissions: [], // We might want to fetch count instead of actual rows for list view
+          progress: c.progress,
+          status: c.status as "active" | "ended" | "scheduled",
+          createdAt: c.created_at,
+        }))
+
+        // Recalculate status based on dates
+        const updated = mappedCampaigns.map((c) => {
+          const now = new Date()
+          const start = new Date(c.startDate)
+          const end = new Date(c.endDate)
+          let status: Campaign["status"] = "active"
+          if (now < start) status = "scheduled"
+          else if (now > end) status = "ended"
+          return { ...c, status }
+        })
+
+        setCampaigns(updated)
+
+        // Calculate stats
+        const totalClicks = updated.reduce((acc, c) => acc + (c.clicks || 0), 0)
+        const totalJoined = updated.reduce((acc, c) => acc + (c.joined || 0), 0)
+        const activeCampaigns = updated.filter((c) => c.status === "active").length
+        const conversion = totalClicks > 0 ? (totalJoined / totalClicks) * 100 : 0
+        const totalPrizePool = updated.reduce((acc, c) => acc + Number.parseFloat(c.prizeAmount || "0"), 0)
+
+        setStats({
+          clicks: totalClicks,
+          joined: totalJoined,
+          conversion: Number(conversion.toFixed(1)),
+          activeCampaigns,
+          totalPrizePool,
+        })
+      }
     }
+
+    fetchCampaigns()
+
+    // Realtime subscription could go here
   }, [isModalOpen])
 
   const [, setTick] = useState(0)
@@ -132,7 +169,7 @@ export default function DashboardContent() {
         </div>
         <Button
           onClick={() => setIsModalOpen(true)}
-          className="hover:bg-blue-700 px-6 py-6 flex items-center gap-2 shadow-blue-500/20 text-sidebar-accent shadow-none opacity-100 border-0 rounded-xl h-0 bg-blue-600"
+          className="hover:bg-blue-700 px-6 py-6 flex items-center gap-2 shadow-blue-500/20 text-white shadow-none opacity-100 border-0 rounded-xl h-0 bg-blue-600"
         >
           <Plus className="size-5" />
           Create Giveaway Room
@@ -200,7 +237,7 @@ export default function DashboardContent() {
                 <div
                   key={campaign.id}
                   onClick={() => openCampaignDetail(campaign)}
-                  className="glass rounded-2xl overflow-hidden cursor-pointer hover:bg-white/[0.07] transition-all group border border-transparent hover:border-white/10"
+                  className="glass rounded-2xl overflow-hidden cursor-pointer hover:bg-white/[0.07] transition-all group border border-white/20 hover:border-white/40"
                 >
                   {/* Status Banner */}
                   <div
