@@ -7,8 +7,8 @@ import { CHAIN } from "@/lib/constants";
 
 // Initialize Supabase Admin Client
 const supabaseAdmin = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY! // In a real app, use SERVICE_ROLE_KEY for admin rights
+    process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co',
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-key'
 );
 
 export async function POST(req: Request) {
